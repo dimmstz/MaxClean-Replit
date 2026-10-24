@@ -1,0 +1,45 @@
+workflows:
+  maxclean-android:
+    name: MaxClean Android APK
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    environment:
+      node: v22.13.1
+      java: 17
+    triggering:
+      events:
+        - push
+        - tag
+      branch_patterns:
+        - pattern: "*"
+          include: true
+          source: true
+      tag_patterns:
+        - pattern: "v*"
+          include: true
+      cancel_previous_builds: true
+    scripts:
+      - name: Activate pnpm
+        script: |
+          corepack enable
+          corepack prepare pnpm@10.26.1 --activate
+          pnpm --version
+      - name: Install workspace dependencies
+        script: pnpm install --frozen-lockfile
+      - name: Generate the Android project
+        script: |
+          cd "$CM_BUILD_DIR/artifacts/mobile"
+          CI=1 pnpm exec expo prebuild --platform android --no-install --clean
+      - name: Set Android SDK location
+        script: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/artifacts/mobile/android/local.properties"
+      - name: Build installable debug APK
+        script: |
+          cd "$CM_BUILD_DIR/artifacts/mobile/android"
+          ./gradlew --no-daemon assembleDebug
+    artifacts:
+      - artifacts/mobile/android/app/build/outputs/apk/debug/*.apk
+    cache:
+      cache_paths:
+        - ~/.gradle/caches
+        - ~/.gradle/wrapper
