@@ -84,12 +84,12 @@ export default function CleanScreen() {
             Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
             const start = Date.now();
             setCleanStart(start);
-            await scanner.executeClean();
+            const cleaned = await scanner.executeClean();
             addRecord({
               date: Date.now(),
               type: 'smart',
-              spaceFreed: sizeToFree,        // valor capturado antes do reset
-              filesRemoved: fileCount,        // valor capturado antes do reset
+              spaceFreed: cleaned.deletedBytes,
+              filesRemoved: cleaned.deletedCount,
               durationMs: Date.now() - start,
               items: [...new Set(selectedCategories)].map((category) => getCategoryName(category)),
             });
@@ -138,6 +138,7 @@ export default function CleanScreen() {
           <CleanResultCard
             spaceFreed={scanner.cleanedBytes}
             filesRemoved={scanner.cleanedCount}
+            filesFailed={scanner.cleanFailedCount}
             durationMs={Date.now() - cleanStart}
           />
           <Pressable
