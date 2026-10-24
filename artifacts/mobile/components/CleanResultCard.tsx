@@ -13,11 +13,13 @@ import Animated, {
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useColors } from '@/hooks/useColors';
+import { useLanguage } from '@/context/LanguageContext';
 import { formatBytes, formatDuration } from '@/utils/formatters';
 
 interface CleanResultCardProps {
   spaceFreed: number;
   filesRemoved: number;
+  filesFailed?: number;
   durationMs: number;
   onClose?: () => void;
 }
@@ -25,9 +27,11 @@ interface CleanResultCardProps {
 export function CleanResultCard({
   spaceFreed,
   filesRemoved,
+  filesFailed = 0,
   durationMs,
 }: CleanResultCardProps) {
   const colors = useColors();
+  const { t } = useLanguage();
 
   const scale = useSharedValue(0.7);
   const opacity = useSharedValue(0);
@@ -55,7 +59,7 @@ export function CleanResultCard({
           <MaterialCommunityIcons name="check-circle" size={48} color="#fff" />
         </View>
 
-        <Text style={styles.title}>Limpeza Concluída!</Text>
+        <Text style={styles.title}>{t(filesFailed > 0 ? 'cleanPartial' : 'cleanDone')}</Text>
 
         <View style={styles.statsRow}>
           <Stat label="Espaço Liberado" value={formatBytes(spaceFreed)} />
@@ -64,6 +68,11 @@ export function CleanResultCard({
           <View style={styles.divider} />
           <Stat label="Tempo Gasto" value={formatDuration(durationMs)} />
         </View>
+        {filesFailed > 0 && (
+          <Text style={styles.failureText}>
+            {t('filesNotRemoved').replace('{count}', String(filesFailed))}
+          </Text>
+        )}
       </LinearGradient>
     </Animated.View>
   );
@@ -98,6 +107,11 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '800',
     fontFamily: 'Inter_700Bold',
+  },
+  failureText: {
+    color: '#fff',
+    fontSize: 12,
+    textAlign: 'center',
   },
   statsRow: {
     flexDirection: 'row',
