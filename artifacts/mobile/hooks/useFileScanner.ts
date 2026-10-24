@@ -10,7 +10,7 @@
  */
 import { useCallback, useRef, useState } from 'react';
 import { Platform } from 'react-native';
-import { ScannedFile, scanForJunk, deleteFiles } from '@/utils/fileUtils';
+import { ScannedFile, FileScanMode, scanForMode, deleteFiles } from '@/utils/fileUtils';
 
 export type ScanState = 'idle' | 'scanning' | 'done' | 'cleaning' | 'cleaned';
 
@@ -18,6 +18,7 @@ export interface ScanResult {
   files: ScannedFile[];
   totalSize: number;
   byCategory: Record<string, { files: ScannedFile[]; size: number }>;
+  mediaAccess: 'all' | 'limited' | null;
 }
 
 interface ScanProgress {
@@ -25,14 +26,19 @@ interface ScanProgress {
   percent: number;
 }
 
-export function useFileScanner() {
+export function useFileScanner(
+  mode: FileScanMode = 'junk',
+  minSize?: number,
+) {
   const [state, setState] = useState<ScanState>('idle');
   const [result, setResult] = useState<ScanResult | null>(null);
   const [selectedUris, setSelectedUris] = useState<Set<string>>(new Set());
   const [progress, setProgress] = useState<ScanProgress>({ current: '', percent: 0 });
   const [cleanedBytes, setCleanedBytes] = useState(0);
   const [cleanedCount, setCleanedCount] = useState(0);
+  const [cleanFailedCount, setCleanFailedCount] = useState(0);
   const [error, setError] = useState(false);
+  const [errorCode, setErrorCode] = useState<'permission-denied' | 'scan-error' | null>(null);
   const scanGeneration = useRef(0);
 
   /** Inicia o scan */
@@ -41,12 +47,17 @@ export function useFileScanner() {
     setState('scanning');
     setResult(null);
     setSelectedUris(new Set());
+    setCleanedBytes(0);
+    setCleanedCount(0);
+    setCleanFailedCount(0);
     setError(false);
+    setErrorCode(null);
     setProgress({ current: 'Iniciando...', percent: 0 });
 
     try {
       setProgress({ current: 'Escaneando cache...', percent: 15 });
-      const files = await scanForJunk();
+      const scanOutput = await scanForMode(mode, { minSize });
+      const files = scanOutput.files;
       if (generation !== scanGeneration.current) return;
 
       setProgress({ current: 'Analisando resultados...', percent: 85 });
@@ -65,7 +76,12 @@ export function useFileScanner() {
 
       setProgress({ current: 'Concluído!', percent: 100 });
 
-      const scanResult: ScanResult = { files, totalSize, byCategory };
+      const scanResult: ScanResult = {
+        files,
+        totalSize,
+        byCategory,
+        mediaAccess: scanOutput.mediaAccess,
+      };
       setResult(scanResult);
 
       // Seleciona todos por padrão
@@ -76,9 +92,14 @@ export function useFileScanner() {
       if (generation !== scanGeneration.current) return;
       console.warn('[MaxClean] Erro no scan:', err);
       setError(true);
+      setErrorCode(
+        err instanceof Error && 'code' in err && (err as { code?: string }).code === 'permission-denied'
+          ? 'permission-denied'
+          : 'scan-error',
+      );
       setState('idle');
     }
-  }, []);
+  }, [mode, minSize]);
 
   /** Seleciona / desseleciona arquivo */
   const toggleSelect = useCallback((uri: string) => {
@@ -108,49 +129,36 @@ export function useFileScanner() {
     : 0;
 
   /** Executa a limpeza dos itens selecionados */
-  const executeClean = useCallback(async () => {
-    if (!result || selectedUris.size === 0) return;
-
-    setState('cleaning');
-    const startTime = Date.now();
-
-    // Filtra URIs mock (web preview) — não chama FileSystem.delete
-    const realUris = Array.from(selectedUris).filter(
-      (uri) => !uri.startsWith('mock://')
-    );
-    const mockUris = Array.from(selectedUris).filter((uri) =>
-      uri.startsWith('mock://')
-    );
-
-    let totalDeleted = 0;
-    let totalSize = 0;
-
-    // Exclui arquivos reais
-    if (Platform.OS !== 'web' && realUris.length > 0) {
-      const fileMap = new Map(result.files.map((f) => [f.uri, f]));
-      const { deleted, deletedUris } = await deleteFiles(realUris);
-      totalDeleted += deleted;
-      totalSize += deletedUris
-        .reduce((acc, uri) => acc + (fileMap.get(uri)?.size ?? 0), 0);
+  const executeClean = useCallback(async (urisToDelete?: string[]) => {
+    const targetUris = urisToDelete ?? Array.from(selectedUris);
+    if (!result || targetUris.length === 0) {
+      return { deletedBytes: 0, deletedCount: 0, failedCount: 0 };
     }
 
-    // Conta mocks como deletados (para web preview)
-    const fileMap = new Map(result.files.map((f) => [f.uri, f]));
-    totalDeleted += mockUris.length;
-    totalSize += mockUris.reduce(
+    setState('cleaning');
+
+    const fileMap = new Map(result.files.map((file) => [file.uri, file]));
+    const validTargets = targetUris.filter((uri) => fileMap.has(uri));
+    const deletion = Platform.OS === 'web'
+      ? { deleted: 0, failed: validTargets.length, deletedUris: [] as string[] }
+      : await deleteFiles(validTargets);
+    const totalDeleted = deletion.deleted;
+    const totalSize = deletion.deletedUris.reduce(
       (acc, uri) => acc + (fileMap.get(uri)?.size ?? 0),
-      0
+      0,
     );
+    const deletedUris = new Set(deletion.deletedUris);
 
     // Use the actual result, not the requested count. A file may disappear,
     // be read-only, or fail permission checks during deletion.
     setCleanedBytes(totalSize);
     setCleanedCount(totalDeleted);
+    setCleanFailedCount(deletion.failed);
 
-    // Remove itens deletados do resultado
+    // Keep failed items visible so the user can retry or choose another action.
     setResult((prev) => {
       if (!prev) return null;
-      const remaining = prev.files.filter((f) => !selectedUris.has(f.uri));
+      const remaining = prev.files.filter((file) => !deletedUris.has(file.uri));
       const newTotal = remaining.reduce((acc, f) => acc + f.size, 0);
       const newByCategory: typeof prev.byCategory = {};
       for (const f of remaining) {
@@ -159,12 +167,18 @@ export function useFileScanner() {
         newByCategory[f.category].files.push(f);
         newByCategory[f.category].size += f.size;
       }
-      return { files: remaining, totalSize: newTotal, byCategory: newByCategory };
+      return {
+        files: remaining,
+        totalSize: newTotal,
+        byCategory: newByCategory,
+        mediaAccess: prev.mediaAccess,
+      };
     });
 
-    setSelectedUris(new Set());
+    setSelectedUris(new Set(validTargets.filter((uri) => !deletedUris.has(uri))));
     setState('cleaned');
-  }, [result, selectedUris, selectedSize]);
+    return { deletedBytes: totalSize, deletedCount: totalDeleted, failedCount: deletion.failed };
+  }, [result, selectedUris]);
 
   /** Reset para escanear novamente */
   const reset = useCallback(() => {
@@ -174,7 +188,9 @@ export function useFileScanner() {
     setSelectedUris(new Set());
     setCleanedBytes(0);
     setCleanedCount(0);
+    setCleanFailedCount(0);
     setError(false);
+    setErrorCode(null);
     setProgress({ current: '', percent: 0 });
   }, []);
 
@@ -186,7 +202,9 @@ export function useFileScanner() {
     progress,
     cleanedBytes,
     cleanedCount,
+    cleanFailedCount,
     error,
+    errorCode,
     startScan,
     toggleSelect,
     toggleSelectAll,
